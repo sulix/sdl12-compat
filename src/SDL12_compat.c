@@ -3260,6 +3260,33 @@ LoadOpenGLFunctions(void)
     #include "SDL20_syms.h"
 }
 
+static void
+ResolveFauxBackbufferMSAA()
+{
+    const GLboolean has_scissor = OpenGLFuncs.glIsEnabled(GL_SCISSOR_TEST);
+
+    GLint old_draw_fbo, old_read_fbo;
+    OpenGLFuncs.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw_fbo);
+    OpenGLFuncs.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_fbo);
+
+
+    if (has_scissor) {
+        OpenGLFuncs.glDisable(GL_SCISSOR_TEST);  /* scissor test affects framebuffer_blit */
+    }
+
+    OpenGLFuncs.glBindFramebuffer(GL_READ_FRAMEBUFFER, OpenGLLogicalScalingFBO);
+    OpenGLFuncs.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, OpenGLLogicalScalingMultisampleFBO);
+    OpenGLFuncs.glBlitFramebuffer(0, 0, OpenGLLogicalScalingWidth, OpenGLLogicalScalingHeight,
+                                  0, 0, OpenGLLogicalScalingWidth, OpenGLLogicalScalingHeight,
+                                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    if (has_scissor) {
+        OpenGLFuncs.glEnable(GL_SCISSOR_TEST);
+    }
+    OpenGLFuncs.glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read_fbo);
+    OpenGLFuncs.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw_fbo);
+}
+
 /* if the app binds its own framebuffer objects, it'll try to bind the window framebuffer
    (always zero) to draw to the screen, but if we're using a framebuffer object to handle
    scaling, we need to catch those binds and make sure rendering intended for the window
@@ -3275,6 +3302,8 @@ glBindFramebuffer_shim_for_scaling(GLenum target, GLuint name)
        old, but this is rarely a problem. If it turns out to cause issues, we could force a resolve at
        this point. */
     if (OpenGLLogicalScalingMultisampleFBO && (target == GL_READ_FRAMEBUFFER)) {
+        if (name == 0)
+            ResolveFauxBackbufferMSAA();
         OpenGLFuncs.glBindFramebuffer(target, (name == 0) ? OpenGLLogicalScalingMultisampleFBO : name);
     } else if (target == GL_DRAW_FRAMEBUFFER) {
         OpenGLFuncs.glBindFramebuffer(target, (name == 0) ? OpenGLLogicalScalingFBO : name);
@@ -3282,11 +3311,20 @@ glBindFramebuffer_shim_for_scaling(GLenum target, GLuint name)
         OpenGLFuncs.glBindFramebuffer(target, (name == 0) ? OpenGLLogicalScalingFBO : name);
     } else {
         /* assume it's GL_FRAMEBUFFER, but we need separate read and draw buffers */
+        if (name == 0)
+            ResolveFauxBackbufferMSAA();
         OpenGLFuncs.glBindFramebuffer(GL_READ_FRAMEBUFFER, (name == 0) ? OpenGLLogicalScalingMultisampleFBO : name);
         OpenGLFuncs.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (name == 0) ? OpenGLLogicalScalingFBO : name);
     }
 }
 
+static void GLAPIENTRY
+glCopyTexImage2D_shim_for_scaling(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border)
+{
+    if (OpenGLLogicalScalingMultisampleFBO)
+        ResolveFauxBackbufferMSAA();
+    OpenGLFuncs.glCopyTexImage2D(target, level, internalformat, x, y, width, height, border);
+}
 
 static SDL_bool
 InitializeOpenGLScaling(const int w, const int h)
@@ -4500,6 +4538,9 @@ SDL_GL_GetProcAddress(const char *sym)
     /* see comments on glBindFramebuffer_shim_for_scaling for explanation */
     if ((SDL20_strcmp(sym, "glBindFramebuffer") == 0) || (SDL20_strcmp(sym, "glBindFramebufferEXT") == 0)) {
         return (void *) glBindFramebuffer_shim_for_scaling;
+    }
+    if ((SDL20_strcmp(sym, "glCopyTexImage2D") == 0)) {
+        return (void *) glCopyTexImage2D_shim_for_scaling;
     }
     return SDL20_GL_GetProcAddress(sym);
 }
