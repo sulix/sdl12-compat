@@ -4467,6 +4467,8 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
         const SDL_bool want_vsync = (vsync_env && SDL20_atoi(vsync_env)) ? SDL_TRUE : SDL_FALSE;
         const SDL_bool want_nearest = (scale_method_env && !SDL20_strcmp(scale_method_env, "nearest"))? SDL_TRUE : SDL_FALSE;
         SDL_RendererInfo rinfo;
+        Uint32 texture_format = SDL_PIXELFORMAT_UNKNOWN;
+        int i;
         SDL_assert(!VideoGLContext20);  /* either a new window or we destroyed all this */
         if (!VideoRenderer20 && want_vsync) {
             VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
@@ -4504,20 +4506,30 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
             VideoConvertSurface20 = NULL;
         }
 
+        /* find a texture format which matches the desired appfmt */
+        for (i = 0; i < rinfo.num_texture_formats; ++i) {
+            if (0 && rinfo.texture_formats[i] == appfmt) {
+                texture_format = rinfo.texture_formats[i];
+            }
+        }
+
+        /* need to convert between app's format and texture format */
+        if (texture_format == SDL_PIXELFORMAT_UNKNOWN) {
+            texture_format = rinfo.texture_formats[0];
+
+            VideoConvertSurface20 = CreateNullPixelSurface20(width, height, texture_format);
+            if (!VideoConvertSurface20) {
+                return EndVidModeCreate();
+            }
+        }
+
         SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, want_nearest?"0":"1");
-        VideoTexture20 = SDL20_CreateTexture(VideoRenderer20, rinfo.texture_formats[0], SDL_TEXTUREACCESS_STREAMING, width, height);
+        VideoTexture20 = SDL20_CreateTexture(VideoRenderer20, texture_format, SDL_TEXTUREACCESS_STREAMING, width, height);
         SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, old_scale_quality);
         if (!VideoTexture20) {
             return EndVidModeCreate();
         }
 
-        if (rinfo.texture_formats[0] != appfmt) {
-            /* need to convert between app's format and texture format */
-            VideoConvertSurface20 = CreateNullPixelSurface20(width, height, rinfo.texture_formats[0]);
-            if (!VideoConvertSurface20) {
-                return EndVidModeCreate();
-            }
-        }
 
         VideoSurface12->flags &= ~SDL12_OPENGL;
         VideoSurface12->surface20->pixels = SDL20_malloc(height * VideoSurface12->pitch);
