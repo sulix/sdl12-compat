@@ -59,6 +59,10 @@
 
 #define SDL_BlitSurface SDL_UpperBlit
 
+#ifdef __LINUX__
+#include <unistd.h> /* for readlink() */
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1122,6 +1126,75 @@ UnloadSDL20(void)
     CloseSDL20Library();
 }
 
+typedef struct QuirkEntryType
+{
+    const char *exe_name;
+    const char *hint_name;
+    const char *hint_value;
+} QuirkEntryType;
+
+QuirkEntryType quirks[] = {
+    {"dosbox", "SDL12COMPAT_USE_KEYBOARD_LAYOUT", "0"},
+
+    {"Awesomenauts.bin.x86", "SDL12COMPAT_OPENGL_SCALING", "0"},
+    {"Awesomenauts.bin.x86", "SDL_VIDEODRIVER", "x11"},
+    {"Awesomenauts.bin.x86", "SDL12COMPAT_FORCE_GL_SWAPBUFFER_CONTEXT", "1"}
+};
+
+const char *SDL12Compat_GetExeName()
+{
+    static const char *exename = NULL;
+    if (exename == NULL) {
+        static char path_buf[260];
+        static char *base_path;
+        char path_separator = '/';
+#ifdef _WIN32
+        path_separator = '\\';
+        GetModuleFileName(NULL, path_buf, 260);
+#elif defined(__linux__)
+        readlink("/proc/self/exe", path_buf, 260);
+#else
+#warning GetExeName not implemented
+#endif
+        base_path = SDL20_strrchr(path_buf, path_separator);
+        if (base_path) {
+            /* We have a '\\' component. */
+            exename = base_path + 1;
+        } else {
+            /* No slashes, return the whole module filanem. */
+            exename = path_buf;
+        }
+    }
+    return exename;
+}
+
+const char *SDL12Compat_GetHint(const char *name, const char *defvalue)
+{
+    const char *value;
+    const char *exe_name;
+    int i;
+    
+    /* First, check if there's an environment variable override. */
+    value = SDL20_getenv(name);
+    if (value) {
+        return value;
+    }
+
+    /* Else, look up the quirks table. */
+    exe_name = SDL12Compat_GetExeName();
+    for (i = 0; i < SDL_arraysize(quirks); i++) {
+        if (!SDL20_strcmp(exe_name, quirks[i].exe_name)) {
+            if (!SDL20_strcmp(name, quirks[i].hint_name)) {
+                return quirks[i].hint_value;
+            }
+        }
+    }
+
+    /* Otherwise, return the default value. */
+    return defvalue;
+}
+
+
 static int
 LoadSDL20(void)
 {
@@ -1141,7 +1214,7 @@ LoadSDL20(void)
                 if (!okay) {
                     sprintf_fn(loaderror, "SDL2 %d.%d.%d library is too old.", v.major, v.minor, v.patch);
                 } else {
-                    const char *envr = SDL20_getenv("SDL12COMPAT_DEBUG_LOGGING");
+                    const char *envr = SDL12Compat_GetHint("SDL12COMPAT_DEBUG_LOGGING", NULL);
                     const SDL_bool debug_logging = (!envr || (SDL20_atoi(envr) == 0)) ? SDL_FALSE : SDL_TRUE;
                     #if ENABLE_FIXMES == 1
                     PrintFixmes = debug_logging;
@@ -1258,7 +1331,6 @@ SDL_SetModuleHandle(void *handle)
     (void) handle;/* handled internally by SDL2 - nothing to do.. */
 }
 #endif
-
 
 DECLSPEC const SDL_version * SDLCALL
 SDL_Linked_Version(void)
@@ -1630,7 +1702,7 @@ Init12VidModes(void)
     int i, j;
     SDL12_Rect prev_mode = { 0, 0, 0, 0 }, current_mode = { 0, 0, 0, 0 };
     /* We only want to enable fake modes if OpenGL Logical Scaling is enabled. */
-    const char *env = SDL20_getenv("SDL12COMPAT_OPENGL_SCALING");
+    const char *env = SDL12Compat_GetHint("SDL12COMPAT_OPENGL_SCALING", NULL);
     SDL_bool use_fake_modes = (!env || SDL20_atoi(env)) ? SDL_TRUE : SDL_FALSE;
 
     if (VideoModesCount > 0) {
@@ -1733,7 +1805,7 @@ static int
 Init12Video(void)
 {
     const char *driver = SDL20_GetCurrentVideoDriver();
-    const char *layout_env = SDL20_getenv("SDL12COMPAT_USE_KEYBOARD_LAYOUT");
+    const char *layout_env = SDL12Compat_GetHint("SDL12COMPAT_USE_KEYBOARD_LAYOUT", NULL);
     SDL_DisplayMode mode;
     int i;
 
@@ -1820,6 +1892,7 @@ DECLSPEC int SDLCALL
 SDL_InitSubSystem(Uint32 sdl12flags)
 {
     Uint32 sdl20flags = 0;
+    const char *forcevideodrv;
     int rc;
 
 #ifdef __WINDOWS__
@@ -1837,6 +1910,12 @@ SDL_InitSubSystem(Uint32 sdl12flags)
     extern void sdl12_compat_macos_init(void);
     sdl12_compat_macos_init();
 #endif
+
+    /* Some applications need to force a specific videodriver. */
+    forcevideodrv = SDL12Compat_GetHint("SDL_VIDEODRIVER", NULL);
+    if (forcevideodrv) {
+        SDL20_setenv("SDL_VIDEODRIVER", forcevideodrv, 1);
+    }
 
     FIXME("support SDL_INIT_EVENTTHREAD where it makes sense?");
     #define SETFLAG(flag) if (sdl12flags & SDL12_INIT_##flag) sdl20flags |= SDL_INIT_##flag
@@ -4846,7 +4925,7 @@ InitializeOpenGLScaling(const int w, const int h)
     int alpha_size = 0;
 
     /* Support the MOUSE_RELATIVE_SCALING hint from SDL 2.0 for OpenGL scaling. */
-    env = SDL20_getenv("SDL_MOUSE_RELATIVE_SCALING");
+    env = SDL12Compat_GetHint("SDL_MOUSE_RELATIVE_SCALING", NULL);
     UseMouseRelativeScaling = (!env || SDL20_atoi(env)) ? SDL_TRUE : SDL_FALSE;
 
     if (!OpenGLFuncs.SUPPORTS_GL_ARB_framebuffer_object) {
@@ -4958,9 +5037,9 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
            that binds our logical FBO instead of the window framebuffer, we can probably
            work with these apps, too. That's easy from SDL_GL_GetProcAddress, but we
            maybe need to export the symbol from here too, for those that link against
-           OpenGL directly. UT2004 is known to use FBOs with SDL 1.2, and I assume
+           OpenGL directly. UT2004 is known to use FBOs with SDL 1., NULL2, and I assume
            idTech 4 games (Doom 3, Quake 4, Prey) do as well. */
-        env = SDL20_getenv("SDL12COMPAT_OPENGL_SCALING");
+        env = SDL12Compat_GetHint("SDL12COMPAT_OPENGL_SCALING", NULL);
 
         /* for now we default GL scaling to ENABLED. If an app breaks or is linked directly
            to glBindFramebuffer, they'll need to turn it off with this environment variable */
@@ -4974,12 +5053,12 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
         use_highdpi = (flags12 & SDL12_FULLSCREEN) ? use_gl_scaling : SDL_FALSE;
     }
 
-    env = SDL20_getenv("SDL12COMPAT_HIGHDPI");
+    env = SDL12Compat_GetHint("SDL12COMPAT_HIGHDPI", NULL);
     if (env) {
         use_highdpi = SDL20_atoi(env) ? SDL_TRUE : SDL_FALSE;
     }
 
-    env = SDL20_getenv("SDL12COMPAT_FIX_BORDERLESS_FS_WIN");
+    env = SDL12Compat_GetHint("SDL12COMPAT_FIX_BORDERLESS_FS_WIN", NULL);
     if (env) {
         fix_bordless_fs_win = SDL20_atoi(env) ? SDL_TRUE : SDL_FALSE;
     }
@@ -5175,7 +5254,7 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
     }
 
     if (flags12 & SDL12_OPENGL) {
-        const char *vsync_env = SDL20_getenv("SDL12COMPAT_SYNC_TO_VBLANK");
+        const char *vsync_env = SDL12Compat_GetHint("SDL12COMPAT_SYNC_TO_VBLANK", NULL);
         SDL_assert(!VideoTexture20);  /* either a new window or we destroyed all this */
         SDL_assert(!VideoRenderer20);
 
@@ -5237,9 +5316,9 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
 
     } else {
         /* always use a renderer for non-OpenGL windows. */
-        const char *vsync_env = SDL20_getenv("SDL12COMPAT_SYNC_TO_VBLANK");
+        const char *vsync_env = SDL12Compat_GetHint("SDL12COMPAT_SYNC_TO_VBLANK", NULL);
         const char *old_scale_quality = SDL20_GetHint(SDL_HINT_RENDER_SCALE_QUALITY);
-        const char *scale_method_env = SDL20_getenv("SDL12COMPAT_SCALE_METHOD");
+        const char *scale_method_env = SDL12Compat_GetHint("SDL12COMPAT_SCALE_METHOD", NULL);
         const SDL_bool want_vsync = (vsync_env && SDL20_atoi(vsync_env)) ? SDL_TRUE : SDL_FALSE;
         const SDL_bool want_nearest = (scale_method_env && !SDL20_strcmp(scale_method_env, "nearest"))? SDL_TRUE : SDL_FALSE;
         SDL_RendererInfo rinfo;
@@ -6596,9 +6675,12 @@ DECLSPEC void SDLCALL
 SDL_GL_SwapBuffers(void)
 {
     if (VideoWindow20) {
+        if (SDL12Compat_GetHint("SDL12COMPAT_FORCE_GL_SWAPBUFFER_CONTEXT", NULL)) {
+            SDL20_GL_MakeCurrent(VideoWindow20, VideoGLContext20);
+        }
         if (OpenGLLogicalScalingFBO != 0) {
             const GLboolean has_scissor = OpenGLFuncs.glIsEnabled(GL_SCISSOR_TEST);
-            const char *scale_method_env = SDL20_getenv("SDL12COMPAT_SCALE_METHOD");
+            const char *scale_method_env = SDL12Compat_GetHint("SDL12COMPAT_SCALE_METHOD", NULL);
             const SDL_bool want_nearest = (scale_method_env && !SDL20_strcmp(scale_method_env, "nearest"))? SDL_TRUE : SDL_FALSE;
             int physical_w, physical_h;
             GLfloat clearcolor[4];
@@ -7297,7 +7379,7 @@ InitializeCDSubsystem(void)
         return;
     }
 
-    cdpath = SDL20_getenv("SDL12COMPAT_FAKE_CDROM_PATH");
+    cdpath = SDL12Compat_GetHint("SDL12COMPAT_FAKE_CDROM_PATH", NULL);
     if (cdpath) {
         CDRomPath = SDL_strdup(cdpath);
     }
