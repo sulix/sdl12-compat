@@ -194,6 +194,8 @@ SDL20_SYM_PASSTHROUGH(int,CondWaitTimeout,(SDL_cond *a, SDL_mutex *b, Uint32 c),
 
 SDL20_SYM(int,AtomicGet,(SDL_atomic_t *a),(a),return)
 SDL20_SYM(void,AtomicSet,(SDL_atomic_t *a, int b),(a,b),)
+SDL20_SYM(int,AtomicGetPtr,(void **a),(a),return)
+SDL20_SYM(void,AtomicSetPtr,(void **a, int b),(a,b),)
 
 SDL20_SYM(SDL_AudioSpec *,LoadWAV_RW,(SDL_RWops *a, int b, SDL_AudioSpec *c, Uint8 **d, Uint32 *e),(a,b,c,d,e),return)
 SDL20_SYM(int,OpenAudio,(SDL_AudioSpec *a, SDL_AudioSpec *b),(a,b),return)

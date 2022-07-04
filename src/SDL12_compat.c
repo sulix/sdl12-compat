@@ -5146,6 +5146,102 @@ InitializeOpenGLScaling(const int w, const int h)
     return SDL_TRUE;
 }
 
+typedef struct VideoInitParams {
+    int width;
+    int height;
+    Uint32 appfmt;
+} VideoInitParams;
+
+typedef struct VideoRenderReq {
+    int type;
+    SDL_sem *sem;
+    SDL_Texture *tex;
+    SDL_Rect *rect;
+    void **pixels;
+    int *pitch;
+} VideoRenderReq;
+
+static SDL_sem *VideoRenderInitDone = NULL;
+static SDL_Thread *VideoRenderThread;
+static VideoRenderReq *VideoRenderRequest = NULL;
+
+static void
+PresentScreen(void);
+static int RenderThread(void *ptr)
+{
+    const char *vsync_env = SDL12Compat_GetHint("SDL12COMPAT_SYNC_TO_VBLANK");
+    const char *old_scale_quality = SDL20_GetHint(SDL_HINT_RENDER_SCALE_QUALITY);
+    const char *scale_method_env = SDL12Compat_GetHint("SDL12COMPAT_SCALE_METHOD");
+    const SDL_bool want_vsync = (vsync_env && SDL20_atoi(vsync_env)) ? SDL_TRUE : SDL_FALSE;
+    const SDL_bool want_nearest = (scale_method_env && !SDL20_strcmp(scale_method_env, "nearest"))? SDL_TRUE : SDL_FALSE;
+    SDL_RendererInfo rinfo;
+    VideoInitParams *params = (VideoInitParams *)ptr;
+    VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
+    if (!VideoRenderer20 && want_vsync) {
+        VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
+    }
+    if (!VideoRenderer20) {
+        VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED);
+    }
+    if (!VideoRenderer20) {
+        VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, 0);
+    }
+
+    printf("Renderer20 = %p\n", VideoRenderer20);
+    SDL20_RenderSetLogicalSize(VideoRenderer20, params->width, params->height);
+
+    /* we need to make sure we're at the back of the Event Watch queue */	
+    SDL20_DelEventWatch(EventFilter20to12, NULL);
+    SDL20_AddEventWatch(EventFilter20to12, NULL);
+
+    SDL20_SetRenderDrawColor(VideoRenderer20, 0, 0, 0, 255);  /* leave this black always, we only use it to clear the framebuffer. */
+    SDL20_RenderClear(VideoRenderer20);
+    SDL20_RenderPresent(VideoRenderer20);
+
+    if (VideoTexture20) {
+        SDL20_DestroyTexture(VideoTexture20);
+    }
+
+    if (VideoConvertSurface20) {
+        SDL20_FreeSurface(VideoConvertSurface20);
+        VideoConvertSurface20 = NULL;
+    }
+    SDL20_GetRendererInfo(VideoRenderer20, &rinfo);
+    SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, want_nearest?"0":"1");
+    VideoTexture20 = SDL20_CreateTexture(VideoRenderer20, rinfo.texture_formats[0], SDL_TEXTUREACCESS_STREAMING, params->width, params->height);
+    SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, old_scale_quality);
+
+    printf("Texture20 = %p\n", VideoTexture20);
+
+    if (rinfo.texture_formats[0] != params->appfmt) {
+        /* need to convert between app's format and texture format */
+        VideoConvertSurface20 = CreateNullPixelSurface20(params->width, params->height, rinfo.texture_formats[0]);
+    }
+    SDL20_SemPost(VideoRenderInitDone);
+
+    while (1)
+    {
+        VideoRenderReq *req = (VideoRenderReq *)SDL20_AtomicGetPtr(&VideoRenderRequest);
+        if (req)
+        {
+            if (req->type == 0) {
+                SDL20_LockTexture(req->tex, req->rect, req->pixels, req->pitch);
+            }
+            else if (req->type == 1) {
+                SDL20_UnlockTexture(req->tex);
+            }
+            SDL20_AtomicSetPtr(&VideoRenderRequest, NULL);
+            SDL20_SemPost(req->sem);
+        }
+        /* If the app is doing dirty rectangles, we set a flag and present the
+         *  screen surface when they pump for new events if we're close to 60Hz,
+         *  which we consider a sign that they are done rendering for the current
+         *  frame and it would make sense to send it to the screen. */
+        if (VideoSurfacePresentTicks && SDL_TICKS_PASSED(SDL20_GetTicks(), VideoSurfacePresentTicks)) {
+            PresentScreen();
+        }
+    }
+}
 
 static void HandleInputGrab(SDL12_GrabMode mode);
 
@@ -5441,62 +5537,16 @@ SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags12)
 
     } else {
         /* always use a renderer for non-OpenGL windows. */
-        const char *vsync_env = SDL12Compat_GetHint("SDL12COMPAT_SYNC_TO_VBLANK");
-        const char *old_scale_quality = SDL20_GetHint(SDL_HINT_RENDER_SCALE_QUALITY);
-        const char *scale_method_env = SDL12Compat_GetHint("SDL12COMPAT_SCALE_METHOD");
-        const SDL_bool want_vsync = (vsync_env && SDL20_atoi(vsync_env)) ? SDL_TRUE : SDL_FALSE;
-        const SDL_bool want_nearest = (scale_method_env && !SDL20_strcmp(scale_method_env, "nearest"))? SDL_TRUE : SDL_FALSE;
-        SDL_RendererInfo rinfo;
+        VideoInitParams params = { width, height, appfmt };
         SDL_assert(!VideoGLContext20);  /* either a new window or we destroyed all this */
-        if (!VideoRenderer20 && want_vsync) {
-            VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
-        }
-        if (!VideoRenderer20) {
-            VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, SDL_RENDERER_ACCELERATED);
-        }
-        if (!VideoRenderer20) {
-            VideoRenderer20 = SDL20_CreateRenderer(VideoWindow20, -1, 0);
-        }
-        if (!VideoRenderer20) {
-            return EndVidModeCreate();
-        }
 
-        SDL20_RenderSetLogicalSize(VideoRenderer20, width, height);
+        VideoRenderInitDone = SDL20_CreateSemaphore(0);
+        VideoRenderThread = SDL20_CreateThread(RenderThread, "sdl12compat-renderthread", &params);
 
-        /* we need to make sure we're at the back of the Event Watch queue */	
-        SDL20_DelEventWatch(EventFilter20to12, NULL);
-        SDL20_AddEventWatch(EventFilter20to12, NULL);
-
-        SDL20_SetRenderDrawColor(VideoRenderer20, 0, 0, 0, 255);  /* leave this black always, we only use it to clear the framebuffer. */
-        SDL20_RenderClear(VideoRenderer20);
-        SDL20_RenderPresent(VideoRenderer20);
-
-        if (SDL20_GetRendererInfo(VideoRenderer20, &rinfo) < 0) {
-            return EndVidModeCreate();
-        }
-
-        if (VideoTexture20) {
-            SDL20_DestroyTexture(VideoTexture20);
-        }
-
-        if (VideoConvertSurface20) {
-            SDL20_FreeSurface(VideoConvertSurface20);
-            VideoConvertSurface20 = NULL;
-        }
-
-        SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, want_nearest?"0":"1");
-        VideoTexture20 = SDL20_CreateTexture(VideoRenderer20, rinfo.texture_formats[0], SDL_TEXTUREACCESS_STREAMING, width, height);
-        SDL20_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, old_scale_quality);
+        SDL20_SemWait(VideoRenderInitDone);
+        SDL20_DestroySemaphore(VideoRenderInitDone);
         if (!VideoTexture20) {
             return EndVidModeCreate();
-        }
-
-        if (rinfo.texture_formats[0] != appfmt) {
-            /* need to convert between app's format and texture format */
-            VideoConvertSurface20 = CreateNullPixelSurface20(width, height, rinfo.texture_formats[0]);
-            if (!VideoConvertSurface20) {
-                return EndVidModeCreate();
-            }
         }
 
         VideoSurface12->flags &= ~SDL12_OPENGL;
@@ -6030,12 +6080,13 @@ SDL_UpdateRects(SDL12_Surface *surface12, int numrects, SDL12_Rect *rects12)
         int i, j;
 
         for (i = 0; i < numrects; i++) {
+            VideoRenderReq lockreq = { 0, SDL20_CreateSemaphore(0), VideoTexture20, &rect20, &pixels, &pitch };
             UpdateRect12to20(surface12, &rects12[i], &rect20, &whole_screen);
             if (!rect20.w || !rect20.h) {
                 continue;
-            } else if (SDL20_LockTexture(VideoTexture20, &rect20, &pixels, &pitch) < 0) {
-                continue;  /* oh well */
             }
+            SDL20_AtomicSetPtr(&VideoRenderRequest, &lockreq);
+            SDL20_SemWait(lockreq.sem);
 
             if (VideoConvertSurface20) {
                 SDL_Rect dstrect20;  /* pretend that the subregion is just the top left of the convert surface. */
@@ -6059,7 +6110,10 @@ SDL_UpdateRects(SDL12_Surface *surface12, int numrects, SDL12_Rect *rects12)
                 }
             }
 
-            SDL20_UnlockTexture(VideoTexture20);
+            lockreq.type = 1;
+            SDL20_AtomicSetPtr(&VideoRenderRequest, &lockreq);
+            SDL20_SemWait(lockreq.sem);
+            SDL20_DestroySemaphore(lockreq.sem);
         }
 
         if (VideoConvertSurface20) {  /* reset some state we messed with */
@@ -6071,7 +6125,7 @@ SDL_UpdateRects(SDL12_Surface *surface12, int numrects, SDL12_Rect *rects12)
         }
 
         if (whole_screen) {
-            PresentScreen();  /* flip it now. */
+            // TODO: force blit
         } else {
             VideoSurfacePresentTicks = VideoSurfaceLastPresentTicks + GetDesiredMillisecondsPerFrame();  /* flip it later. */
         }
@@ -6109,14 +6163,6 @@ DECLSPEC void SDLCALL
 SDL_PumpEvents(void)
 {
     SDL_Event e;
-
-    /* If the app is doing dirty rectangles, we set a flag and present the
-     *  screen surface when they pump for new events if we're close to 60Hz,
-     *  which we consider a sign that they are done rendering for the current
-     *  frame and it would make sense to send it to the screen. */
-    if (VideoSurfacePresentTicks && SDL_TICKS_PASSED(SDL20_GetTicks(), VideoSurfacePresentTicks)) {
-        PresentScreen();
-    }
     while (SDL20_PollEvent(&e)) {  /* spin to drain the SDL2 event queue. */ }
 
     /* If there's a pending KEYDOWN event, and we haven't got a TEXTINPUT
