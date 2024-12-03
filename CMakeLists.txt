@@ -78,6 +78,8 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${EXTRA_CFLAGS}")
 string(STRIP "${CMAKE_C_FLAGS}" CMAKE_C_FLAGS)
 
+target_link_libraries(SDL PRIVATE cdio cdio_cdda cdio_paranoia)
+
 if(UNIX AND NOT APPLE)
     set_target_properties(SDL PROPERTIES COMPILE_DEFINITIONS "_REENTRANT")
     target_link_libraries(SDL PRIVATE ${CMAKE_DL_LIBS})
